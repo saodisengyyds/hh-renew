@@ -781,10 +781,8 @@ def _is_logged_in(sb):
         body = (sb.get_text("body") or "").lower()
         if re.search(r"logout|退出|sign out", body):
             return True
-        if sb.execute_script(
-            "return !!document.querySelector('input[name=\"web_address\"],#web_address')"
-        ):
-            return True
+        # 注意：续期表单对游客也会渲染，不能用表单存在判断登录态
+        # （2026-11-01 实测：cookie 已死时该判断误报有效，提交后被踢回 /login）
         return False
     except Exception:
         return False
@@ -1310,8 +1308,8 @@ def renew(sb):
     _wait_ready(sb, 40)
     _pass_ad_wall(sb)
 
-    if "/login" in (sb.get_current_url() or "").lower():
-        print("ℹ️  被重定向到登录页，先登录")
+    if "/login" in (sb.get_current_url() or "").lower() or not _is_logged_in(sb):
+        print("ℹ️  未登录（或会话已失效），先登录")
         if not login(sb):
             return False, None
         sb.open(renew_url())
