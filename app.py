@@ -1584,6 +1584,7 @@ def renew(sb):
           fd.append('web_address', 'hax.co.id');
           fd.append('agreement', 'yes');
           fd.append('cf-turnstile-response', tokEl ? tokEl.value : '');
+          fd.append('submit_button', '');
           fetch('/vps-renew/', {method: 'POST', body: fd, credentials: 'same-origin'})
             .then(function(r){ return r.text().then(function(t){
               var low = t.toLowerCase();
@@ -1591,12 +1592,14 @@ def renew(sb):
                    || t.match(/expires on[^0-9]*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
               cb(JSON.stringify({
                 status: r.status,
+                url: r.url,
                 success: low.indexOf('has been renewed') !== -1
                       || low.indexOf('renewed until') !== -1
                       || low.indexOf('successfully renewed') !== -1,
                 check: low.indexOf('please check your input') !== -1,
                 expiry: m ? m[1] : null,
-                len: t.length
+                len: t.length,
+                body: t.slice(0, 1200)
               }));
             });})
             .catch(function(e){ cb(JSON.stringify({error: 'fetch: ' + e.message})); });
