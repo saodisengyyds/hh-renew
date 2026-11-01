@@ -1156,17 +1156,22 @@ def _login_by_telegram(sb, tg_wait: int) -> bool:
 
     if clean_phone.startswith("+"):
         rest = clean_phone[1:]
-        if rest.startswith("86") and len(rest) == 13:
+        if rest.startswith("86") and len(rest) >= 13:
             country_code, number = "86", rest[2:]
-        elif rest.startswith("86") and len(rest) > 13:
-            country_code, number = "86", rest[2:]
+        elif rest.startswith("1") and len(rest) == 11:
+            country_code, number = "1", rest[1:]
         else:
             # 其他国家的 +xx，交给页面自己处理
             country_code, number = "", rest
     elif clean_phone.startswith("86") and len(clean_phone) == 13:
         country_code, number = "86", clean_phone[2:]
-    elif clean_phone.startswith("1") and len(clean_phone) == 11:
+    elif re.fullmatch(r'1[3-9]\d{9}', clean_phone):
+        # 11 位且符合国内号段（1[3-9] 开头）才是国内手机号
         country_code, number = "86", clean_phone
+    elif clean_phone.startswith("1") and len(clean_phone) == 11:
+        # 同样是 11 位 1 开头、但不符合国内号段 → 北美号码（国家码 1）
+        # （旧逻辑一律按 +86 解析，美号永远收不到 Telegram 确认）
+        country_code, number = "1", clean_phone[1:]
     else:
         country_code, number = "86", clean_phone
 
@@ -1285,10 +1290,50 @@ def _login_by_telegram(sb, tg_wait: int) -> bool:
         f"Telegram 已发送确认消息，请在手机上点击确认",
     )
 
-    # 保存当前状态供后续复用
     _step(sb, "tg-phone-sent")
-    print("✅ 手机号提交流程完成")
-    return True
+    print(f"⏳ 等待你在 Telegram 里点确认（最多 {tg_wait} 秒）…")
+    deadline = time.time() + tg_wait
+    confirmed = False
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            cur = sb.get_current_url() or ""
+        except Exception:
+            cur = ""
+        if SITE and SITE in cur:
+            # 已回跳站点：会话可能刚种下，去续期页验登录态
+            time.sleep(3)
+            try:
+                sb.open(renew_url())
+                time.sleep(4)
+            except Exception:
+                pass
+            if _is_logged_in(sb):
+                confirmed = True
+            break
+        # 还在授权页：出现已确认提示时回登录页再验一次，验不到继续等
+        try:
+            t = (sb.get_text("body") or "").lower()
+        except Exception:
+            t = ""
+        if "confirmed" in t or "已确认" in t:
+            try:
+                sb.open(login_url())
+                time.sleep(4)
+                if _is_logged_in(sb):
+                    confirmed = True
+                    break
+            except Exception:
+                pass
+
+    if confirmed:
+        print("✅ Telegram 已确认，登录完成")
+        save_cookies(sb)
+        return True
+
+    print("❌ 等待 Telegram 确认超时")
+    send_tg("❌", "登录超时", "未等到 Telegram 确认，请重试")
+    return False
 
 
 # ==================== 续期 ====================
