@@ -1569,6 +1569,50 @@ def renew(sb):
     except Exception:
         pass
 
+    # 2.5) HTTP 直提：表单实测只剩三件套（web_address / agreement /
+    #      cf-turnstile-response；captcha 与 reCAPTCHA 按钮都是被注释掉的
+    #      死代码）。浏览器负责登录与拿 token，提交走原生 POST，
+    #      绕开屡屡被广告/回调吞掉的按钮点击。
+    try:
+        import requests as _rq
+        _token = _ts_token()
+        _jar = {}
+        try:
+            for _c in sb.driver.get_cookies():
+                if _c.get("name"):
+                    _jar[_c["name"]] = _c.get("value") or ""
+        except Exception:
+            pass
+        _proxies = None
+        if os.environ.get("IS_PROXY", "false").lower() == "true":
+            _p = (os.environ.get("PROXY_SERVER") or "").strip() or "http://127.0.0.1:1081"
+            _proxies = {"http": _p, "https": _p}
+        print(f"  🌐 HTTP 直提（token {len(_token)} 字符，cookie {len(_jar)} 个）…")
+        _resp = _rq.post(
+            renew_url(),
+            data={"web_address": SITE_HOST, "agreement": "yes",
+                  "cf-turnstile-response": _token},
+            cookies=_jar, proxies=_proxies, timeout=40,
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/139.0.0.0 Safari/537.36",
+                     "Referer": renew_url()})
+        _txt = (_resp.text or "").lower()
+        print(f"  🌐 HTTP {_resp.status_code}，响应 {len(_resp.text)} 字符")
+        if ("has been renewed" in _txt or "renewed until" in _txt
+                or "successfully renewed" in _txt):
+            _d = parse_expiry(_resp.text)
+            print(f"  🎉 HTTP 直提成功，新到期日: {_d}")
+            send_tg("✅", f"续期成功（HTTP 直提）\n📅 新到期日: {_d}",
+                    (_resp.text or "")[:300])
+            return True, _d
+        if "please check your input" in _txt:
+            print("  ⚠️  HTTP 直提被打回：check your input，转按钮路径")
+        else:
+            print("  ℹ️  HTTP 直提无明确标记，转按钮路径")
+    except Exception as e:
+        print(f"  ⚠️  HTTP 直提异常: {str(e)[:80]}，转按钮路径")
+
     # 2) 按 DOM 顺序逐个点提交按钮（历次 dump 中顺序稳定：第一个是
     #    reCAPTCHA 触发按钮、第二个是普通按钮；属性识别在本站读取
     #    通道下屡次失败，故不再识别，点一个验一个）

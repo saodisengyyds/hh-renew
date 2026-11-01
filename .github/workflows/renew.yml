@@ -36,7 +36,7 @@ jobs:
 
       - name: 📦 安装 Python 依赖
         run: |
-          pip install --no-cache-dir seleniumbase requests
+          pip install --no-cache-dir seleniumbase requests PySocks
           seleniumbase install chromedriver
 
       - name: ⚙ 设置代理（可选）
