@@ -1569,49 +1569,61 @@ def renew(sb):
     except Exception:
         pass
 
-    # 2.5) HTTP 直提：表单实测只剩三件套（web_address / agreement /
-    #      cf-turnstile-response；captcha 与 reCAPTCHA 按钮都是被注释掉的
-    #      死代码）。浏览器负责登录与拿 token，提交走原生 POST，
-    #      绕开屡屡被广告/回调吞掉的按钮点击。
+    # 2.5) 页内 fetch 直提：表单只剩三件套（captcha / reCAPTCHA 按钮
+    #      都是注释掉的死代码）。用页面自身的 fetch 提交——与站点
+    #      处理器同源、同指纹，Cloudflare 无法区别对待（上一轮用
+    #      requests 在浏览器外 POST 被 CF 以 403 拦下：cf_clearance
+    #      与 TLS 指纹绑定，出了浏览器就失效）。
     try:
-        import requests as _rq
-        _token = _ts_token()
-        _jar = {}
-        try:
-            for _c in sb.driver.get_cookies():
-                if _c.get("name"):
-                    _jar[_c["name"]] = _c.get("value") or ""
-        except Exception:
-            pass
-        _proxies = None
-        if os.environ.get("IS_PROXY", "false").lower() == "true":
-            _p = (os.environ.get("PROXY_SERVER") or "").strip() or "http://127.0.0.1:1081"
-            _proxies = {"http": _p, "https": _p}
-        print(f"  🌐 HTTP 直提（token {len(_token)} 字符，cookie {len(_jar)} 个）…")
-        _resp = _rq.post(
-            renew_url(),
-            data={"web_address": SITE_HOST, "agreement": "yes",
-                  "cf-turnstile-response": _token},
-            cookies=_jar, proxies=_proxies, timeout=40,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/139.0.0.0 Safari/537.36",
-                     "Referer": renew_url()})
-        _txt = (_resp.text or "").lower()
-        print(f"  🌐 HTTP {_resp.status_code}，响应 {len(_resp.text)} 字符")
-        if ("has been renewed" in _txt or "renewed until" in _txt
-                or "successfully renewed" in _txt):
-            _d = parse_expiry(_resp.text)
-            print(f"  🎉 HTTP 直提成功，新到期日: {_d}")
-            send_tg("✅", f"续期成功（HTTP 直提）\n📅 新到期日: {_d}",
-                    (_resp.text or "")[:300])
+        sb.driver.set_script_timeout(45)
+        _res = sb.driver.execute_async_script("""
+        var cb = arguments[arguments.length - 1];
+        try {
+          var tokEl = document.querySelector('input[name="cf-turnstile-response"]');
+          var fd = new FormData();
+          fd.append('web_address', 'hax.co.id');
+          fd.append('agreement', 'yes');
+          fd.append('cf-turnstile-response', tokEl ? tokEl.value : '');
+          fetch('/vps-renew/', {method: 'POST', body: fd, credentials: 'same-origin'})
+            .then(function(r){ return r.text().then(function(t){
+              var low = t.toLowerCase();
+              var m = t.match(/renewed until[^0-9]*([0-9]{4}-[0-9]{2}-[0-9]{2})/i)
+                   || t.match(/expires on[^0-9]*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
+              cb(JSON.stringify({
+                status: r.status,
+                success: low.indexOf('has been renewed') !== -1
+                      || low.indexOf('renewed until') !== -1
+                      || low.indexOf('successfully renewed') !== -1,
+                check: low.indexOf('please check your input') !== -1,
+                expiry: m ? m[1] : null,
+                len: t.length
+              }));
+            });})
+            .catch(function(e){ cb(JSON.stringify({error: 'fetch: ' + e.message})); });
+        } catch (e) {
+          cb(JSON.stringify({error: 'sync: ' + e.message}));
+        }
+        """)
+        print(f"  🌐 页内 fetch 直提结果: {_res}")
+        _r = json.loads(_res) if _res else {}
+        if _r.get("success"):
+            from datetime import datetime as _dt
+            _d = None
+            try:
+                _d = _dt.strptime(_r["expiry"], "%Y-%m-%d").date() if _r.get("expiry") else None
+            except Exception:
+                pass
+            print(f"  🎉 页内直提成功，新到期日: {_d}")
+            send_tg("✅", f"续期成功（页内直提）\n📅 新到期日: {_d}", str(_res)[:300])
             return True, _d
-        if "please check your input" in _txt:
-            print("  ⚠️  HTTP 直提被打回：check your input，转按钮路径")
+        if _r.get("check"):
+            print("  ⚠️  页内直提被打回：check your input，转按钮路径")
+        elif _r.get("error"):
+            print(f"  ⚠️  页内直提异常：{_r.get('error')}，转按钮路径")
         else:
-            print("  ℹ️  HTTP 直提无明确标记，转按钮路径")
+            print("  ℹ️  页内直提无明确标记，转按钮路径")
     except Exception as e:
-        print(f"  ⚠️  HTTP 直提异常: {str(e)[:80]}，转按钮路径")
+        print(f"  ⚠️  页内直提失败: {str(e)[:80]}，转按钮路径")
 
     # 2) 按 DOM 顺序逐个点提交按钮（历次 dump 中顺序稳定：第一个是
     #    reCAPTCHA 触发按钮、第二个是普通按钮；属性识别在本站读取
