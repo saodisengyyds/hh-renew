@@ -1354,50 +1354,82 @@ def renew(sb):
         return False, None
     print("  ✅ 续期表单已就位")
 
-    # 网站地址
+    # 网站地址（旧版先点输入框再 send_keys，点的时候常被广告遮罩拦截、
+    # 整步静默失败；这里以 send_keys 为主，并用 get_property 验证真值）
     print("✏️  填网站地址…")
-    # 原生输入：这个页面 JS 执行不稳定（execute_script 常返回 None）
-    filled_addr = False
-    for sel in ['input[name="web_address"]', '#web_address']:
+    addr_ok = False
+    for attempt in range(3):
         try:
-            el = sb.find_element(sel, timeout=3)
-            if el and el.is_displayed():
-                el.clear()
-                el.click()
-                el.send_keys(SITE_HOST)
-                filled_addr = True
-                print(f"  ✅ 已填 {SITE_HOST}（{sel}）")
-                break
-        except Exception:
-            continue
-    if not filled_addr:
-        print("  ⚠️  没填上网站地址，尝试 JS 兜底")
+            el = sb.find_element('input[name="web_address"]', timeout=3)
+            if el:
+                try:
+                    sb.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", el)
+                except Exception:
+                    pass
+                time.sleep(0.4)
+                try:
+                    el.clear()
+                except Exception:
+                    pass
+                try:
+                    el.send_keys(SITE_HOST)
+                except Exception:
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    ActionChains(sb.driver).move_to_element(el).click().send_keys(SITE_HOST).perform()
+                time.sleep(0.3)
+                cur = el.get_property("value") or ""
+                if cur == SITE_HOST:
+                    addr_ok = True
+                    print(f"  ✅ 已填 {SITE_HOST}（第 {attempt+1} 次）")
+                    break
+                print(f"  ⚠️  第 {attempt+1} 次填入未生效，现值: {cur!r}")
+        except Exception as e:
+            print(f"  ⚠️  填地址异常: {str(e)[:60]}")
+        _pass_ad_wall(sb)
+    if not addr_ok:
         try:
             sb.driver.execute_script(
-                "var e=document.querySelector('#web_address');if(e)e.value='%s';" % SITE_HOST)
+                "var e=document.querySelector('#web_address');"
+                "if(e){e.focus();e.value='" + SITE_HOST + "';"
+                "e.dispatchEvent(new Event('input',{bubbles:true}));"
+                "e.dispatchEvent(new Event('change',{bubbles:true}));}")
+            el = sb.find_element('input[name="web_address"]', timeout=3)
+            addr_ok = bool(el and (el.get_property("value") or "") == SITE_HOST)
+            print(f"  {'✅' if addr_ok else '⚠️'} JS 兜底后验证: {addr_ok}")
         except Exception:
             pass
-    time.sleep(1)
+    time.sleep(0.5)
 
-    # 协议
+    # 协议（点 label 或坐标点复选框，用 get_property('checked') 验证）
     print("☑️  勾协议…")
     checked = False
-    try:
-        ag = sb.find_element('input[name="agreement"]', timeout=3)
-        if ag:
-            if not ag.is_selected():
-                try:
-                    ag.click()
-                except Exception:
-                    # 被遮挡时点它的 label
-                    try:
-                        sb.find_element('label.form-check-label', timeout=2).click()
-                    except Exception:
-                        pass
-            checked = ag.is_selected()
-            print(f"  {'✅' if checked else '⚠️'} 协议勾选状态: {checked}")
-    except Exception as e:
-        print(f"  ⚠️  勾协议异常: {str(e)[:60]}")
+    for attempt in range(3):
+        try:
+            ag = sb.find_element('input[name="agreement"]', timeout=3)
+            if ag and (ag.get_property("checked") or ag.is_selected()):
+                checked = True
+                break
+            clicked = False
+            try:
+                lab = sb.find_element('label.form-check-label', timeout=2)
+                if lab:
+                    lab.click()
+                    clicked = True
+            except Exception:
+                pass
+            if not clicked and ag:
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(sb.driver).move_to_element(ag).click().perform()
+            time.sleep(0.4)
+            ag = sb.find_element('input[name="agreement"]', timeout=3)
+            checked = bool(ag and (ag.get_property("checked") or ag.is_selected()))
+            if checked:
+                break
+        except Exception as e:
+            print(f"  ⚠️  勾协议异常: {str(e)[:60]}")
+        _pass_ad_wall(sb)
+    print(f"  {'✅' if checked else '⚠️'} 协议勾选状态: {checked}")
     time.sleep(0.5)
 
     # 验证码（如果页面要求）—— 原生查找
@@ -1425,21 +1457,33 @@ def renew(sb):
     submitted = False
     reason = ""
 
-    # 这个页面 execute_script 经常返回 None，全部改用原生 Selenium 操作
-
-    # 1) 等 Turnstile token（原生读 value 属性）
-    print("  ⏳ 等 Turnstile token…")
-    token_ok = False
-    for i in range(20):
+    def _ts_token():
+        # 本站属性读取不稳定（get_attribute 常拿到空值）：先 get_property，
+        # 再用 page_source 正则兜底（历次 dump 证明序列化 DOM 里 token 完整）
         try:
-            el = sb.find_element('input[name="cf-turnstile-response"]', timeout=2)
-            v = el.get_attribute("value") or ""
-            if len(v) > 20:
-                print(f"  ✅ Turnstile 就绪（{len(v)} 字符）")
-                token_ok = True
-                break
+            for e in sb.find_elements('input[name="cf-turnstile-response"]'):
+                v = e.get_property("value") or ""
+                if len(v) > 20:
+                    return v
         except Exception:
             pass
+        try:
+            m = re.search(r'name="cf-turnstile-response"[^>]*value="([^"]{20,})"',
+                          sb.get_page_source() or "")
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        return ""
+
+    # 1) 等 Turnstile token
+    print("  ⏳ 等 Turnstile token…")
+    token_ok = False
+    for i in range(15):
+        if _ts_token():
+            print("  ✅ Turnstile 就绪")
+            token_ok = True
+            break
         time.sleep(1)
     if not token_ok:
         print("  🖱️  token 未就绪，GUI 点击 Turnstile 验证框…")
@@ -1447,41 +1491,46 @@ def renew(sb):
             sb.uc_gui_click_captcha()
         except Exception as e:
             print(f"  ⚠️  GUI 点击异常: {str(e)[:60]}")
-        for i in range(20):
-            try:
-                el = sb.find_element('input[name="cf-turnstile-response"]', timeout=2)
-                v = el.get_attribute("value") or ""
-                if len(v) > 20:
-                    print(f"  ✅ Turnstile 就绪（{len(v)} 字符）")
-                    token_ok = True
-                    break
-            except Exception:
-                pass
+        for i in range(25):
+            if _ts_token():
+                print("  ✅ Turnstile 就绪")
+                token_ok = True
+                break
             time.sleep(1)
     if not token_ok:
         print("  ⚠️  Turnstile token 未就绪，仍尝试提交")
 
-    # 2) 找提交按钮（两个同名、无文本）
+    # 2) 按钮分类：outerHTML 带 data-callback 的是 reCAPTCHA 触发按钮；
+    #    读不到时用 page_source 的 DOM 顺序兜底（历次 dump 中均为第一个）
     btns = []
     try:
         btns = sb.find_elements('button[name="submit_button"]')
     except Exception:
         pass
     print(f"  找到 {len(btns)} 个 submit_button")
-    # 两个同名按钮分工不同：带 data-callback 的是 reCAPTCHA 触发按钮
-    # （点击走 grecaptcha → onSubmit 回调提交），另一个是普通按钮
     recaptcha_btn, plain_btn = None, None
     for b in btns:
         try:
-            if b.get_attribute("data-callback"):
-                recaptcha_btn = b
-            elif plain_btn is None:
-                plain_btn = b
+            oh = b.get_attribute("outerHTML") or ""
+        except Exception:
+            oh = ""
+        if "data-callback" in oh:
+            recaptcha_btn = b
+        elif plain_btn is None:
+            plain_btn = b
+    if recaptcha_btn is None and len(btns) >= 2:
+        try:
+            src = sb.get_page_source() or ""
+            pos = src.find('name="submit_button"')
+            if pos != -1 and "data-callback" in src[pos:pos + 300]:
+                recaptcha_btn = btns[0]
+                if plain_btn is btns[0]:
+                    plain_btn = btns[1]
         except Exception:
             pass
+    print(f"  按钮分类: reCAPTCHA={'有' if recaptcha_btn else '无'}, 普通={'有' if plain_btn else '无'}")
 
-    # 3) 分类点击：先点 reCAPTCHA 按钮（10-30 实测成功路径）；
-    #    未见成功且 Turnstile token 已就绪时，改点普通按钮重试一次
+    # 3) 点击：先点 reCAPTCHA 按钮；未见成功且 token 已就绪时改点普通按钮
     def _click_btn(b, tag):
         try:
             sb.driver.execute_script(
@@ -1505,13 +1554,6 @@ def renew(sb):
         return ("has been renewed" in t or "renewed until" in t
                 or "successfully renewed" in t or "续期成功" in t)
 
-    def _token_now():
-        try:
-            el = sb.find_element('input[name="cf-turnstile-response"]', timeout=2)
-            return len(el.get_attribute("value") or "") > 20
-        except Exception:
-            return False
-
     first = recaptcha_btn or plain_btn
     if first is not None:
         try:
@@ -1526,7 +1568,7 @@ def renew(sb):
         time.sleep(10)
         _pass_ad_wall(sb)
         if not _success_seen() and plain_btn is not None and plain_btn is not first:
-            if _token_now():
+            if _ts_token():
                 print("  🔁 首击未见成功且 Turnstile token 已就绪，改点普通按钮重试…")
                 try:
                     _click_btn(plain_btn, "普通")
