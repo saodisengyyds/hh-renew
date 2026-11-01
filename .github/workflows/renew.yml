@@ -1,10 +1,8 @@
 name: HH Auto Renew
 
 on:
-  schedule:
-    # 每天北京时间 09:10 检查一次
-    # 脚本自己判断：距到期 ≤2 天才续期，否则跳过
-    - cron: '10 1 * * *'
+  # 2026-11-01 起停用定时触发：续期已改走本地全链（UC 浏览器+节点+
+  # TG 码两步流程，Actions 版缺第二步填码环节）。保留手动触发备查。
   workflow_dispatch:
     inputs:
       force:
