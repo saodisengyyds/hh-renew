@@ -1468,34 +1468,75 @@ def renew(sb):
     except Exception:
         pass
     print(f"  找到 {len(btns)} 个 submit_button")
-
-    # 3) 依次尝试点击
-    for idx, b in enumerate(btns):
+    # 两个同名按钮分工不同：带 data-callback 的是 reCAPTCHA 触发按钮
+    # （点击走 grecaptcha → onSubmit 回调提交），另一个是普通按钮
+    recaptcha_btn, plain_btn = None, None
+    for b in btns:
         try:
-            if not b.is_displayed():
-                continue
-            # 滚到可视区
-            try:
-                sb.driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", b)
-            except Exception:
-                pass
-            time.sleep(0.5)
-            try:
-                b.click()
-            except Exception:
-                # 被遮挡时用 ActionChains 坐标点
-                try:
-                    from selenium.webdriver.common.action_chains import ActionChains
-                    ActionChains(sb.driver).move_to_element(b).click().perform()
-                except Exception:
-                    continue
-            submitted = True
-            reason = f"native_click[{idx}]"
-            print(f"  ✅ 点击按钮 #{idx}")
-            break
+            if b.get_attribute("data-callback"):
+                recaptcha_btn = b
+            elif plain_btn is None:
+                plain_btn = b
+        except Exception:
+            pass
+
+    # 3) 分类点击：先点 reCAPTCHA 按钮（10-30 实测成功路径）；
+    #    未见成功且 Turnstile token 已就绪时，改点普通按钮重试一次
+    def _click_btn(b, tag):
+        try:
+            sb.driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", b)
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            b.click()
+        except Exception:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(sb.driver).move_to_element(b).click().perform()
+        print(f"  ✅ 点击按钮（{tag}）")
+        return True
+
+    def _success_seen():
+        try:
+            t = (sb.get_text("body") or "").lower()
+        except Exception:
+            return False
+        return ("has been renewed" in t or "renewed until" in t
+                or "successfully renewed" in t or "续期成功" in t)
+
+    def _token_now():
+        try:
+            el = sb.find_element('input[name="cf-turnstile-response"]', timeout=2)
+            return len(el.get_attribute("value") or "") > 20
+        except Exception:
+            return False
+
+    first = recaptcha_btn or plain_btn
+    if first is not None:
+        try:
+            if _click_btn(first, "reCAPTCHA" if first is recaptcha_btn else "普通"):
+                submitted = True
+                reason = "first_click"
         except Exception as e:
-            print(f"  ⚠️  按钮 #{idx} 点击失败: {str(e)[:60]}")
+            print(f"  ⚠️  首次点击失败: {str(e)[:60]}")
+
+    if submitted:
+        print("⏳ 等待结果…")
+        time.sleep(10)
+        _pass_ad_wall(sb)
+        if not _success_seen() and plain_btn is not None and plain_btn is not first:
+            if _token_now():
+                print("  🔁 首击未见成功且 Turnstile token 已就绪，改点普通按钮重试…")
+                try:
+                    _click_btn(plain_btn, "普通")
+                    reason = "plain_retry"
+                    time.sleep(10)
+                    _pass_ad_wall(sb)
+                except Exception as e:
+                    print(f"  ⚠️  重试点击失败: {str(e)[:60]}")
+            else:
+                print("  ℹ️  首击未见成功，token 仍未就绪，不重试")
 
     # 4) 兜底：提交表单
     if not submitted:
@@ -1516,11 +1557,6 @@ def renew(sb):
         return False, None
 
     print(f"  ✅ 已提交（{reason}）")
-
-    print("⏳ 等待结果…")
-    time.sleep(8)
-    _pass_ad_wall(sb)
-
     return _check_result(sb)
 
 
