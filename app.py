@@ -790,6 +790,138 @@ def _is_logged_in(sb):
 
 # ==================== 登录 ====================
 
+TG_COOKIE_FILE = "tg_cookies.json"
+
+
+def _login_by_tg_session(sb) -> bool:
+    """用已保存的 Telegram 网页会话 cookie 免确认登录（全自动）。
+
+    原理：oauth.telegram.org 的会话 cookie（stel_token 等）在场时，
+    授权页直接显示已登录账号 + 接受按钮，不再走手机号 + App 确认。
+    cookie 来自 TG_COOKIES Secret（tg_cookies.json），长效；每次成功
+    登录后回存最新值到同一文件（经 artifact 带出，可刷新 Secret）。
+    """
+    if not os.path.exists(TG_COOKIE_FILE):
+        return False
+    try:
+        tg_cookies = json.load(open(TG_COOKIE_FILE, encoding="utf-8"))
+    except Exception as e:
+        print(f"⚠️  TG cookie 读取失败: {e}")
+        return False
+    if not tg_cookies:
+        return False
+
+    print(f"\n🔑 尝试 Telegram 会话 cookie 免确认登录（{len(tg_cookies)} 个）…")
+    try:
+        sb.open("https://oauth.telegram.org/")
+        time.sleep(2)
+        added = 0
+        for c in tg_cookies:
+            item = {"name": c.get("name"), "value": c.get("value", "")}
+            if c.get("domain"):
+                item["domain"] = c["domain"]
+            item["path"] = c.get("path") or "/"
+            exp = c.get("expires")
+            if exp and float(exp) > 0:
+                item["expiry"] = int(float(exp))
+            if c.get("secure"):
+                item["secure"] = True
+            if c.get("httpOnly"):
+                item["httpOnly"] = True
+            try:
+                sb.driver.add_cookie(item)
+                added += 1
+            except Exception as e:
+                print(f"  ⚠️  注入 {c.get('name')} 失败: {str(e)[:60]}")
+        print(f"  🍪 已注入 {added}/{len(tg_cookies)} 个 TG cookie")
+        if added == 0:
+            return False
+
+        auth = (
+            "https://oauth.telegram.org/auth?bot_id=5938743585"
+            f"&origin=https://{SITE_HOST}&return_to={login_url()}"
+        )
+        sb.open(auth)
+        time.sleep(5)
+        _step(sb, "tg-session-auth")
+
+        has_phone = False
+        for sel in ('input[name="phone"]', 'input[type="tel"]',
+                    'input[name="phone_number"]'):
+            try:
+                if sb.is_element_visible(sel):
+                    has_phone = True
+                    break
+            except Exception:
+                pass
+        if has_phone:
+            print("  ❌ 授权页仍要求手机号：TG 会话未被接受")
+            return False
+
+        # 已登录态：找接受/确认按钮点击
+        clicked = False
+        for sel in ('button[type="submit"]', 'input[type="submit"]', "button"):
+            try:
+                for el in sb.driver.find_elements("css selector", sel):
+                    t = (el.text or el.get_attribute("value") or "").strip()
+                    if sel == "button" and not any(
+                            k in t for k in ("Accept", "Log in", "Continue",
+                                             "Confirm", "Allow")):
+                        continue
+                    el.click()
+                    clicked = True
+                    print(f"  🖱️  已点击授权按钮（{sel}: {t[:20]}）")
+                    break
+            except Exception:
+                pass
+            if clicked:
+                break
+        if not clicked:
+            print("  ℹ️  未找到授权按钮，可能已自动授权，看回跳结果")
+
+        # 等回跳 hax 并验证登录态（最多 ~40 秒）
+        for _ in range(8):
+            time.sleep(5)
+            try:
+                cur = sb.get_current_url() or ""
+            except Exception:
+                cur = ""
+            if SITE_HOST in cur:
+                break
+        try:
+            sb.open(SITE if SITE.endswith("/") else SITE + "/")
+        except Exception:
+            pass
+        time.sleep(3)
+        if _is_logged_in(sb):
+            print("  ✅ TG 会话免确认登录成功")
+            save_cookies(sb)
+            # 回存最新 TG cookie（会话可能轮换）
+            try:
+                raw = sb.driver.get_cookies()
+                tg_now = [c for c in raw if "telegram" in (c.get("domain") or "")]
+                if tg_now:
+                    items = [{
+                        "name": c.get("name"), "value": c.get("value", ""),
+                        "domain": c.get("domain"), "path": c.get("path") or "/",
+                        "expires": c.get("expiry", -1),
+                        "httpOnly": c.get("httpOnly", False),
+                        "secure": c.get("secure", False),
+                    } for c in tg_now]
+                    with open(TG_COOKIE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(items, f)
+                    print(f"  🍪 TG cookie 已回存（{len(items)} 个）")
+            except Exception as e:
+                print(f"  ⚠️  TG cookie 回存失败: {str(e)[:60]}")
+            return True
+        print("  ❌ TG 会话登录未生效")
+        _step(sb, "tg-session-failed")
+        return False
+    except Exception as e:
+        print(f"  ⚠️  TG 会话登录异常: {str(e)[:100]}")
+        return False
+
+
 def login(sb, tg_wait: int = 300) -> bool:
     """
     hax 的登录是 Telegram OAuth Widget（不是手机号表单）。
@@ -1843,7 +1975,7 @@ def main():
 
             # ---------- 2) cookie 不可用 → 登录 ----------
             if not used_cookie:
-                if not login(sb):
+                if not _login_by_tg_session(sb) and not login(sb):
                     sys.exit(5)
                 ok, new_expiry = renew(sb)
 

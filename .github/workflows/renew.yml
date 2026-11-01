@@ -53,12 +53,17 @@ jobs:
       - name: 🍪 恢复 cookie
         env:
           HH_COOKIES: ${{ secrets.HH_COOKIES }}
+          TG_COOKIES: ${{ secrets.TG_COOKIES }}
         run: |
           if [ -n "$HH_COOKIES" ]; then
             printf '%s' "$HH_COOKIES" > hh_cookies.json
             echo "已从 Secret 恢复 cookie（$(wc -c < hh_cookies.json) bytes）"
           else
             echo "无 cookie Secret，本次将走登录流程"
+          fi
+          if [ -n "$TG_COOKIES" ]; then
+            printf '%s' "$TG_COOKIES" > tg_cookies.json
+            echo "已从 Secret 恢复 TG 会话 cookie（$(wc -c < tg_cookies.json) bytes）"
           fi
 
       - name: 🚀 运行续期
@@ -115,7 +120,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cookies
-          path: hh_cookies.json
+          path: |
+            hh_cookies.json
+            tg_cookies.json
           retention-days: 1
           if-no-files-found: ignore
 
