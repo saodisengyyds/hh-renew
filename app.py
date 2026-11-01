@@ -1569,33 +1569,16 @@ def renew(sb):
     except Exception:
         pass
 
-    # 2) 按钮分类：带 data-callback 的是 reCAPTCHA 触发按钮
+    # 2) 按 DOM 顺序逐个点提交按钮（历次 dump 中顺序稳定：第一个是
+    #    reCAPTCHA 触发按钮、第二个是普通按钮；属性识别在本站读取
+    #    通道下屡次失败，故不再识别，点一个验一个）
     btns = []
     try:
         btns = sb.find_elements('button[name="submit_button"]')
     except Exception:
         pass
-    print(f"  找到 {len(btns)} 个 submit_button")
-    # 分类改用 CSS 属性选择器（浏览器引擎原生匹配，不走 get_attribute
-    # 往返——本站那条通道不可靠，前两轮 outerHTML/属性读法全读空）
-    recaptcha_btn, plain_btn = None, None
-    try:
-        r = sb.find_elements('button[name="submit_button"][data-callback]')
-        if r:
-            recaptcha_btn = r[0]
-    except Exception:
-        pass
-    try:
-        p = sb.find_elements('button[name="submit_button"]:not([data-callback])')
-        if p:
-            plain_btn = p[0]
-    except Exception:
-        pass
-    if recaptcha_btn is None and plain_btn is None and btns:
-        plain_btn = btns[0]
-    print(f"  按钮分类: reCAPTCHA={'有' if recaptcha_btn else '无'}, 普通={'有' if plain_btn else '无'}")
+    print(f"  找到 {len(btns)} 个 submit_button，按顺序逐个尝试")
 
-    # 3) 点击：先点 reCAPTCHA 按钮；未见成功且 token 已就绪时改点普通按钮
     def _click_btn(b, tag):
         try:
             sb.driver.execute_script(
@@ -1611,39 +1594,30 @@ def renew(sb):
         print(f"  ✅ 点击按钮（{tag}）")
         return True
 
-    def _success_seen():
+    for idx, b in enumerate(btns[:2]):
         try:
-            t = (sb.get_text("body") or "").lower()
-        except Exception:
-            return False
-        return ("has been renewed" in t or "renewed until" in t
-                or "successfully renewed" in t or "续期成功" in t)
-
-    first = recaptcha_btn or plain_btn
-    if first is not None:
-        try:
-            if _click_btn(first, "reCAPTCHA" if first is recaptcha_btn else "普通"):
+            if _click_btn(b, f"第 {idx+1} 个"):
                 submitted = True
-                reason = "first_click"
+                reason = f"btn_{idx}"
         except Exception as e:
-            print(f"  ⚠️  首次点击失败: {str(e)[:60]}")
-
-    if submitted:
+            print(f"  ⚠️  第 {idx+1} 个按钮点击失败: {str(e)[:60]}")
+            continue
         print("⏳ 等待结果…")
         time.sleep(10)
         _pass_ad_wall(sb)
-        if not _success_seen() and plain_btn is not None and plain_btn is not first:
-            if _ts_token():
-                print("  🔁 首击未见成功且 Turnstile token 已就绪，改点普通按钮重试…")
-                try:
-                    _click_btn(plain_btn, "普通")
-                    reason = "plain_retry"
-                    time.sleep(10)
-                    _pass_ad_wall(sb)
-                except Exception as e:
-                    print(f"  ⚠️  重试点击失败: {str(e)[:60]}")
-            else:
-                print("  ℹ️  首击未见成功，token 仍未就绪，不重试")
+        try:
+            t = (sb.get_text("body") or "").lower()
+        except Exception:
+            t = ""
+        if ("has been renewed" in t or "renewed until" in t
+                or "successfully renewed" in t or "续期成功" in t):
+            print("  🎉 已见成功标记，停止尝试")
+            break
+        if "please check your input" in t:
+            print("  ⚠️  服务器打回（check your input），换下一个按钮")
+            continue
+        if idx == 0 and len(btns) >= 2:
+            print("  ℹ️  第一个按钮无反应，试第二个")
 
     # 4) 兜底：提交表单
     if not submitted:
