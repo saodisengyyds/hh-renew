@@ -1543,34 +1543,56 @@ def renew(sb):
     if not token_ok:
         print("  ⚠️  Turnstile token 未就绪，仍尝试提交")
 
-    # 2) 按钮分类：outerHTML 带 data-callback 的是 reCAPTCHA 触发按钮；
-    #    读不到时用 page_source 的 DOM 顺序兜底（历次 dump 中均为第一个）
+    # 提交前复核：广告流程可能刷新页面把已填内容冲掉，逐项验真、缺了补
+    try:
+        el = sb.find_element('input[name="web_address"]', timeout=3)
+        if el and (el.get_property("value") or "") != SITE_HOST:
+            try:
+                el.clear()
+            except Exception:
+                pass
+            el.send_keys(SITE_HOST)
+            print("  🔁 提交前补填网站地址")
+    except Exception:
+        pass
+    try:
+        ag = sb.find_element('input[name="agreement"]', timeout=3)
+        if ag and not (ag.get_property("checked") or ag.is_selected()):
+            try:
+                sb.driver.execute_script(
+                    "arguments[0].checked = true;"
+                    "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", ag)
+            except Exception:
+                pass
+            ag = sb.find_element('input[name="agreement"]', timeout=3)
+            print(f"  🔁 提交前补勾协议: {bool(ag and (ag.get_property('checked') or ag.is_selected()))}")
+    except Exception:
+        pass
+
+    # 2) 按钮分类：带 data-callback 的是 reCAPTCHA 触发按钮
     btns = []
     try:
         btns = sb.find_elements('button[name="submit_button"]')
     except Exception:
         pass
     print(f"  找到 {len(btns)} 个 submit_button")
+    # 分类改用 CSS 属性选择器（浏览器引擎原生匹配，不走 get_attribute
+    # 往返——本站那条通道不可靠，前两轮 outerHTML/属性读法全读空）
     recaptcha_btn, plain_btn = None, None
-    for b in btns:
-        try:
-            oh = b.get_attribute("outerHTML") or ""
-        except Exception:
-            oh = ""
-        if "data-callback" in oh:
-            recaptcha_btn = b
-        elif plain_btn is None:
-            plain_btn = b
-    if recaptcha_btn is None and len(btns) >= 2:
-        try:
-            src = sb.get_page_source() or ""
-            pos = src.find('name="submit_button"')
-            if pos != -1 and "data-callback" in src[pos:pos + 300]:
-                recaptcha_btn = btns[0]
-                if plain_btn is btns[0]:
-                    plain_btn = btns[1]
-        except Exception:
-            pass
+    try:
+        r = sb.find_elements('button[name="submit_button"][data-callback]')
+        if r:
+            recaptcha_btn = r[0]
+    except Exception:
+        pass
+    try:
+        p = sb.find_elements('button[name="submit_button"]:not([data-callback])')
+        if p:
+            plain_btn = p[0]
+    except Exception:
+        pass
+    if recaptcha_btn is None and plain_btn is None and btns:
+        plain_btn = btns[0]
     print(f"  按钮分类: reCAPTCHA={'有' if recaptcha_btn else '无'}, 普通={'有' if plain_btn else '无'}")
 
     # 3) 点击：先点 reCAPTCHA 按钮；未见成功且 token 已就绪时改点普通按钮
@@ -1673,6 +1695,11 @@ def _check_result(sb):
         print("⏳ 未到续期时间")
         send_tg("⏳", "未到续期时间", body[:300])
         return True, expiry
+
+    if "please check your input" in low:
+        print("❌ 服务器打回：Please check your input（表单校验未过）")
+        send_tg("❌", "服务器打回：Please check your input", body[:300])
+        return False, expiry
 
     if re.search(r"error|failed|失败|invalid|无效|expired|过期", low):
         print("❌ 续期失败")
